@@ -1,0 +1,121 @@
+var cld = require('users/fitoprincipe/geetools:cloud_masks');
+ 
+ 
+// Load in ROI
+var my_aoi = ee.FeatureCollection('users/jakobrieser1997/Biocrusts/AOI_Lieberose');
+
+// FUNCTIONS 
+// --------------------------------------------------------------------------
+
+
+// function for cloud masking using QA band:
+var maskclouds_QA = function (image) {
+  // Get the pixel QA band.
+  var qa = image.select('pixel_qa');
+  // Bits 3 and 5 are cloud shadow and cloud, respectively.
+  // Use LeftShift-Operators to define Bit values
+  var CloudBitValue = (1 << 5);
+  var CloudShadowBitValue = (1 << 3);
+  // Create masks
+  var shadow_mask = qa.bitwiseAnd(CloudShadowBitValue).eq(0);
+  var cloud_mask = qa.bitwiseAnd(CloudBitValue).eq(0);
+  // Given bit values should be set to zero for masking.
+  var final_mask = shadow_mask.and(cloud_mask);
+  return image.updateMask(final_mask);
+};
+
+// function for cloud masking using QA band on collection 2:
+var maskclouds_QA2 = function (image) {
+  // Get the pixel QA band.
+  var qa = image.select('QA_PIXEL');
+  // Bits 3 and 5 are cloud shadow and cloud, respectively.
+  // Use LeftShift-Operators to define Bit values
+  var dilated_value = (1 << 3);
+  var cloud_value = (1 << 3);
+  var cirrus_value = (1 << 2);
+  var shadow_value = (1 << 4);
+  // Create masks
+  var dilated_mask = qa.bitwiseAnd(dilated_value).eq(0);
+  var cloud_mask = qa.bitwiseAnd(cloud_value).eq(0);
+  var shadow_mask = qa.bitwiseAnd(shadow_value).eq(0);
+  var cirrus_mask = qa.bitwiseAnd(cirrus_value).eq(0);
+  // Given bit values should be set to zero for masking.
+  var final_mask = shadow_mask.and(cloud_mask).and(dilated_mask).and(cirrus_mask);
+  return image.updateMask(final_mask);
+};
+
+// function for cloud masking using Fito:
+function maskclouds_fito(image){
+    return cld.landsatSR()(image);
+  }
+
+
+// APPLICATION 
+// --------------------------------------------------------------------------
+
+
+var L8_col_C1 = ee.ImageCollection("LANDSAT/LC08/C01/T1_SR")
+  .filterBounds(my_aoi)
+  .filterDate('2017-02-18', '2017-04-15'); //for clouds
+  //.filterDate('2017-12-09', '2021-12-11'); //for snow
+  //.filterDate('2018-03-19', '2018-03-21'); //for cirrus
+
+var L8_col_C2_1 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+  .filterBounds(my_aoi)
+  .filterDate('2017-02-18', '2017-04-15'); //for clouds
+  //.filterDate('2017-12-09', '2021-12-11'); //for snow
+  //.filterDate('2018-03-19', '2018-03-21'); //for cirrus
+
+// Applies scaling factors.
+function applyScaleFactors(image) {
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+  return image.addBands(opticalBands, null, true)
+              .addBands(thermalBands, null, true);
+}
+
+var L8_col_C2 = L8_col_C2_1.map(applyScaleFactors);
+
+
+// apply cloud mask based on QA layer:  
+var L8_col_QA = L8_col_C1.map(maskclouds_QA);
+
+// apply cloud mask based on fito:  
+var L8_col_fito = L8_col_C1.map(maskclouds_fito);
+
+// apply cloud mask based on QA layer (C2):  
+var L8_col_QA2 = L8_col_C2.map(maskclouds_QA2);
+
+
+// VISUALIZATION 
+// --------------------------------------------------------------------------
+
+
+
+print("Raw collection C1", L8_col_C1);
+print("Raw collection C2", L8_col_C2);
+print("Masked collection QA", L8_col_QA);
+print("Masked collection fito", L8_col_fito);
+print("Masked collection QA C2", L8_col_QA2);
+
+
+var visualization_C1 = {
+  min: 0,
+  max: 3000,
+  bands: ['B4', 'B3', 'B2'],
+};
+
+var visualization_C2 = {
+  min: 0.0,
+  max: 0.3,
+  bands: ['SR_B4', 'SR_B3', 'SR_B2'],
+};
+
+
+Map.addLayer(L8_col_C1.first(), visualization_C1, 'Raw C1');
+//Map.addLayer(L8_col_C2.first(), visualization_C2, 'Raw C2');
+Map.addLayer(L8_col_QA.first(), visualization_C1, 'Masked QA');
+Map.addLayer(L8_col_fito.first(), visualization_C1, 'Masked fito');
+Map.addLayer(L8_col_QA2.first(), visualization_C2, 'Masked QA C2');
+
+Map.centerObject(my_aoi);

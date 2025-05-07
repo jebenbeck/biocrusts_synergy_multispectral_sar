@@ -1,0 +1,156 @@
+/******************************************************************************
+
+Sentinel 2 Time Series
+
+Description:
+Generates a time series of all available Sentinel 2 scenes
+
+Implemented:
+  - Cloud masking 
+  - Data conversion
+  - Masking to AOI
+  - Filtering to export all with <20% cloud cover based on the AOI
+
+*******************************************************************************/
+
+
+
+// PARAMETERS 
+// --------------------------------------------------------------------------
+
+
+// Required tools
+var tools = require('users/fitoprincipe/geetools:tools');
+var batch = require('users/fitoprincipe/geetools:batch');
+var sentinel2 = require('users/jakobrieser1997/Biocrusts:Functions/Sentinel2');
+var image_processing = require('users/jakobrieser1997/Biocrusts:Functions/Image processing');
+var regional_parameters = require('users/jakobrieser1997/Biocrusts:Functions/Regional parameters');
+
+// define time range
+var START_DATE = "2017-01-01";
+var END_DATE = "2021-12-31";
+
+// Processing options
+var RESAMPLING = "NO";
+var OUTPUT_RESOLUTION = 10;
+
+// Export options
+var EXPORT_ALL_IMAGES = "NO";
+var EXPORT_TABLE = "NO";
+var EXPORT_METRICS = "NO";
+
+// Define regional parameters
+var REGION = "Negev";
+var PARAMETERS = regional_parameters.get_parameters(REGION);
+print("Parameters " + PARAMETERS.AOI_NAME, PARAMETERS);
+
+
+
+// APPLICATION 
+// --------------------------------------------------------------------------
+
+
+// Generate S2 collection
+var col_s2_raw = sentinel2.get_data (PARAMETERS.AOI, START_DATE, END_DATE);
+
+// Apply cloud, shadow masking using s2 cloudless:
+var col_s2_masked =  sentinel2.mask_s2_cloudless(col_s2_raw, PARAMETERS.AOI, START_DATE, END_DATE,
+                                                  30, 0.15, 3, 50);
+
+// Apply snow masking
+var col_s2_masked = col_s2_masked.map(sentinel2.mask_SCL)
+                                 .map(image_processing.add_date);
+
+// Select first images when multiple for single dates are available:
+var col_s2_unique = image_processing.first_images(col_s2_masked);
+
+// remove bad quality imagery
+var col_s2_quality = image_processing.remove_dates(col_s2_unique, PARAMETERS.S2_REMOVE_DATES);
+
+// Convert to float
+var col_s2_casted = col_s2_quality.map(sentinel2.casting);
+
+// Add the mask cover
+var col_s2_maskcover = image_processing.calculate_clear_area(col_s2_casted, PARAMETERS.AOI);
+
+// filter the collection by mask cover
+var col_s2_clear = col_s2_maskcover.filterMetadata('MASK_COVER', 'less_than', 20);
+
+// add indices:
+var col_s2_indices = image_processing.indices(col_s2_clear);
+
+// Resampling
+if (RESAMPLING == "YES") {
+  var col_s2_indices = image_processing.resampling(col_s2_indices, PARAMETERS.EPSG, OUTPUT_RESOLUTION);
+}
+
+// Clip to study area
+var col_s2_aoi = image_processing.clipping(col_s2_indices, PARAMETERS.AOI);
+
+// calculate spatiotemporal metrics
+var col_s2_metrics = image_processing.spatiotemporal_metrics(col_s2_aoi, 
+        ["median", "stDev", "perclq", "percuq"]);
+
+
+
+// VISUALIZSATION 
+// --------------------------------------------------------------------------
+
+print("Raw S2 collection", col_s2_raw);
+print("Unique S2 collection", col_s2_unique);
+print("Good quality S2 collection", col_s2_quality);
+print("Clear S2 collection", col_s2_clear);
+print("Final S2 collection", col_s2_aoi);
+print("Metrics", col_s2_metrics);
+
+Map.centerObject(PARAMETERS.AOI);
+
+//Add masked image layer
+
+var s2_example_img = col_s2_aoi.first(); 
+print("Example Img", s2_example_img);
+Map.addLayer(s2_example_img, {bands: ['R', 'G', 'B'], min: 0, max: 0.3}, 'Masked Image');
+
+
+// EXPORT 
+// --------------------------------------------------------------------------
+
+
+// Export metadata table of acquisitons
+if (EXPORT_TABLE == 'YES') {
+  Export.table.toDrive({
+    collection: col_s2_aoi,
+    folder: 'Master Thesis/Acquisitions',
+    description: 'Acquisitions_Sentinel_2_' + PARAMETERS.AOI_NAME,
+    fileFormat: "CSV",
+    selectors:["DATE_STR", "DATE_TIME", "PRODUCT_ID",
+               "SPACECRAFT_NAME", "MASK_COVER"]
+  });
+}
+
+// Export all individual images
+if (EXPORT_ALL_IMAGES == 'YES') {
+batch.Download.ImageCollection.toDrive(col_s2_aoi, "Master Thesis/Sentinel-2/Images/" + PARAMETERS.AOI_NAME,
+                {name: "{system_date}" + "_" + 
+                    "{SPACECRAFT_NAME}" + "_" + 
+                    PARAMETERS.AOI_NAME,
+                  scale: OUTPUT_RESOLUTION,
+                  region: PARAMETERS.AOI,
+                  crs: PARAMETERS.EPSG,
+                  type: 'float'});
+}
+
+// Export metrics
+if (EXPORT_METRICS == 'YES') {
+  batch.Download.ImageCollection.toDrive(col_s2_metrics, 
+                                         "Master Thesis/Sentinel-2/Metrics/" + PARAMETERS.AOI_NAME,
+                  {name: "{metric}" + "_" +
+                       "Sentinel-2" + "_" +
+                       PARAMETERS.AOI_NAME +"_" +
+                       START_DATE + "_" + 
+                       END_DATE,
+                  scale: OUTPUT_RESOLUTION,
+                  region: PARAMETERS.AOI,
+                  crs: PARAMETERS.EPSG,
+                  type: 'float'});
+}

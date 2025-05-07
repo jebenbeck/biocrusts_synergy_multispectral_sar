@@ -1,0 +1,166 @@
+
+
+
+// PARAMETERS 
+// --------------------------------------------------------------------------
+
+
+// Required tools
+var tools = require('users/fitoprincipe/geetools:tools');
+var batch = require('users/fitoprincipe/geetools:batch');
+var image_processing = require('users/jakobrieser1997/Biocrusts:Functions/Image processing');
+var regional_parameters = require('users/jakobrieser1997/Biocrusts:Functions/Regional parameters');
+var landsat = require('users/jakobrieser1997/Biocrusts:Functions/Landsat');
+var sentinel2 = require('users/jakobrieser1997/Biocrusts:Functions/Sentinel2');
+
+
+// define time range
+var START_DATE = "2017-01-01";
+var END_DATE = "2021-12-31";
+
+// Processing options
+var RESAMPLING = "YES";
+var FUSE_S2 = "YES";
+var OUTPUT_RESOLUTION = 10;
+
+// Export options
+var EXPORT_ALL_IMAGES = "NO";
+var EXPORT_TABLE = "NO";
+var EXPORT_METRICS = "YES";
+
+// Study area parameters
+var REGION = "Soebatsfontein";
+var PARAMETERS = regional_parameters.get_parameters(REGION);
+print("Parameters " + PARAMETERS.AOI_NAME, PARAMETERS);
+
+
+
+// Generate analysis-ready Landsat data  
+// --------------------------------------------------------------------------
+
+
+
+// Generate Landsat 4, 5, 7, 8 collections: 
+var col_L4_raw = landsat.get_data ("L4", PARAMETERS.AOI, START_DATE, END_DATE);
+var col_L5_raw = landsat.get_data ("L5", PARAMETERS.AOI, START_DATE, END_DATE);
+var col_L7_raw = landsat.get_data ("L7", PARAMETERS.AOI, START_DATE, END_DATE);
+var col_L8_raw = landsat.get_data ("L8", PARAMETERS.AOI, START_DATE, END_DATE);
+
+// Merge collections and sort by date
+var col_LS_merged = col_L4_raw.merge(col_L5_raw)
+                              .merge(col_L7_raw)
+                              .merge(col_L8_raw)
+                              .sort("system:time_start")
+                              .map(image_processing.add_date);
+
+// Select first images when multiple for single dates are available:
+var col_LS_unique = image_processing.first_images(col_LS_merged);
+
+// remove bad quality imagery
+var col_LS_quality = image_processing.remove_dates(col_LS_unique, PARAMETERS.LS_REMOVE_DATES);
+
+// Apply cloud, shadow and snow masking
+var col_LS_masked = col_LS_quality.map(landsat.mask_clear_pixels);
+
+// Cast and select bands:
+var col_LS_casted = col_LS_masked.map(landsat.casting);
+
+// Add the mask cover
+var col_LS_maskcover = image_processing.calculate_clear_area(col_LS_casted, PARAMETERS.AOI);
+
+// filter the collection by mask cover
+var col_LS_clear = col_LS_maskcover.filterMetadata('MASK_COVER', 'less_than', 20);
+
+// cast values to match S2 data
+if (FUSE_S2 == "YES") {
+  var col_LS_clear = landsat.casting_LS_S2 (col_LS_clear, PARAMETERS.LS_SLOPES, PARAMETERS.LS_INTERCEPTS);
+}
+
+// add indices
+var col_LS_indices = image_processing.indices(col_LS_clear);
+
+// Resampling:
+if (RESAMPLING == "YES") {
+  var col_LS_indices = image_processing.resampling(col_LS_indices, PARAMETERS.EPSG, OUTPUT_RESOLUTION);
+}
+
+// Clip to study area
+var col_LS_aoi = image_processing.clipping(col_LS_indices, PARAMETERS.AOI);
+
+
+
+// Generate analysis-ready Sentinel-2 data 
+// --------------------------------------------------------------------------
+
+
+
+// Generate S2 collection
+var col_s2_raw = sentinel2.get_data (PARAMETERS.AOI, START_DATE, END_DATE);
+
+// Apply cloud, shadow masking using s2 cloudless:
+var col_s2_masked =  sentinel2.mask_s2_cloudless(col_s2_raw, PARAMETERS.AOI, START_DATE, END_DATE,
+                                                  30, 0.15, 3, 50);
+
+// Apply snow masking
+var col_s2_masked = col_s2_masked.map(sentinel2.mask_SCL)
+                                 .map(image_processing.add_date);
+
+// Select first images when multiple for single dates are available:
+var col_s2_unique = image_processing.first_images(col_s2_masked);
+
+// remove bad quality imagery
+var col_s2_quality = image_processing.remove_dates(col_s2_unique, PARAMETERS.S2_REMOVE_DATES);
+
+// Convert to float
+var col_s2_casted = col_s2_quality.map(sentinel2.casting);
+
+// Add the mask cover
+var col_s2_maskcover = image_processing.calculate_clear_area(col_s2_casted, PARAMETERS.AOI);
+
+// filter the collection by mask cover
+var col_s2_clear = col_s2_maskcover.filterMetadata('MASK_COVER', 'less_than', 20);
+
+// add indices:
+var col_s2_indices = image_processing.indices(col_s2_clear);
+
+// Resampling
+if (RESAMPLING == "YES") {
+  var col_s2_indices = image_processing.resampling(col_s2_indices, PARAMETERS.EPSG, OUTPUT_RESOLUTION);
+}
+
+// Clip to study area
+var col_s2_aoi = image_processing.clipping(col_s2_indices, PARAMETERS.AOI);
+
+
+
+
+// Spatiotemporal metrics of both datasets combined 
+// --------------------------------------------------------------------------
+
+
+// merge image collections:
+var col_LS_S2_merged = col_s2_aoi.merge(col_LS_aoi);
+
+//calculate spatiotemporal_metrics
+var col_metrics = image_processing.spatiotemporal_metrics(col_LS_S2_merged, 
+        ["median", "stDev", "perclq", "percuq"]);
+
+
+print("merged collection", col_LS_S2_merged);
+print("metrics", col_metrics);
+
+
+// Export metrics
+if (EXPORT_METRICS == 'YES') {
+  batch.Download.ImageCollection.toDrive(col_metrics, 
+                                         "Master Thesis/Combined/Metrics/" + PARAMETERS.AOI_NAME,
+                  {name: "{metric}" + "_" +
+                       "Combined" + "_" +
+                       PARAMETERS.AOI_NAME +"_" +
+                       START_DATE + "_" + 
+                       END_DATE,
+                  scale: OUTPUT_RESOLUTION,
+                  region: PARAMETERS.AOI,
+                  crs: PARAMETERS.EPSG,
+                  type: 'float'});
+}

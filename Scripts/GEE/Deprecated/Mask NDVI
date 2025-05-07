@@ -1,0 +1,10 @@
+
+// mask NDVI<0
+var masking = function(image) {
+    var NDVI_mask = image.select("NDVI").gt(0);
+    // Apply mask on image
+    return image.updateMask(NDVI_mask);
+};
+
+var col_LS_ARD = col_LS_indices.map(masking);
+

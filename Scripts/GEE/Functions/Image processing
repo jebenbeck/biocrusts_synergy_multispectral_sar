@@ -1,0 +1,316 @@
+/******************************************************************************
+
+Multispectral Indices
+
+Description:
+Function to calculate the four relevant multispectral Indices. Can be used on any image Collection,
+featuring the correct bands with the correct names. Adds all four bands to the list of bands for each image.
+
+Implemented:
+  - NDVI (Normalized Difference Vegetation Indexs)
+  - BSCI (Biological Soil Crust Index)
+  - CI (Crust Index)
+  - mCI (modified Crust Index)
+
+How to use:
+  Load this script:
+    var indices = require('users/jakobrieser1997/Biocrusts:Functions/Indices');
+  Run it:
+    var new_img_col = indices.add_indices(img_col);
+  
+*******************************************************************************/
+
+
+
+// MULTISPECTRAL INDICES 
+// --------------------------------------------------------------------------
+
+/****
+Description:
+Function to calculate the four relevant multispectral Indices. Can be used on any image Collection,
+featuring the correct bands with the correct names. Adds all four bands to the list of bands for each image.
+
+Implemented:
+  - NDVI (Normalized Difference Vegetation Indexs)
+  - BSCI (Biological Soil Crust Index)
+  - CI (Crust Index)
+  - mCI (modified Crust Index)
+****/
+
+exports.indices = function (image_collection) {
+
+// Add NDVI
+  
+  function apply_ndvi (image){
+    var ndvi_var = image.expression(
+      "(NIR - RED)/(NIR + RED)",
+      {
+      NIR: image.select("NIR"),
+      RED: image.select("R"),
+      });
+    return image
+      .addBands(ndvi_var
+      .rename('NDVI'))
+      .float();
+  }
+
+// Add Crust Index (CI)
+  
+  function apply_ci (image) {
+    var ci_var = image.expression(
+      "1-(RED - BLUE)/(RED + BLUE)",
+      {
+      BLUE: image.select("B"),
+      RED: image.select("R"),
+      });
+    return image
+      .addBands(ci_var
+      .rename('CI'))
+      .float();
+  }
+
+// Add modified Crust Index (mCI)
+
+  function apply_mci (image) {
+    var mci_var = image.expression(
+      "1-(GREEN - RED)/(GREEN + RED)",
+      {
+      GREEN: image.select("G"),
+      RED: image.select("R"),
+      });
+    return image
+      .addBands(mci_var
+      .rename('mCI'))
+      .float();
+  }
+
+
+// Create function for BSCI
+
+  function apply_bsci (image) {
+    var meangrn = image.expression(
+      "(GREEN + RED + NIR)/3",
+      {
+      GREEN: image.select("G"),
+      RED: image.select("R"),
+      NIR: image.select("NIR"),
+      });
+    var absdiffgr = (image.select("R").subtract(image.select("G"))).abs();
+    var bsci_var = image.expression(
+      "(1 - 2 * ABSGR) / MEANGRN",
+      {
+      ABSGR: absdiffgr,
+      MEANGRN: meangrn
+      });
+    return image
+      .addBands(bsci_var
+      .rename("BSCI"))
+      .float();
+  }
+
+// Add the indices to the image collection
+
+  var result = image_collection.map(apply_ndvi)
+                               .map(apply_ci)
+                               .map(apply_mci)
+                               .map(apply_bsci);
+
+// return image collection
+
+  return result;
+  
+};
+
+
+
+// CLIP 
+// --------------------------------------------------------------------------
+
+// Clips all images in collection to the AOI
+
+exports.clipping = function(image_collection, aoi) {
+  
+  function clip_images(image){
+    return image.clip(aoi);
+  }
+  
+  return image_collection.map(clip_images);
+  
+};
+
+
+
+// ADD MASK COVER 
+// --------------------------------------------------------------------------
+
+// Add mask cover (%) property to all images
+
+
+exports.calculate_clear_area = function(image_collection, aoi) {
+
+  var tools = require('users/fitoprincipe/geetools:tools');
+
+  function calc_mask_cover(image) {
+    var mask_cover = tools.image.maskCover(image, aoi);
+    return image.set('MASK_COVER', mask_cover);
+  }
+
+  return image_collection.map(calc_mask_cover);
+
+  
+}; 
+
+
+
+// ADD DATE 
+// --------------------------------------------------------------------------
+
+
+exports.add_date = function(image){
+  return image.set("DATE_STR", ee.String(image.date().format('YYYY-MM-dd')),
+                   "DATE_TIME", ee.String(image.date().format('YYYY-MM-dd H:m:S')));
+};
+
+
+// SPATIO-TEMPORAL METRICS 
+// --------------------------------------------------------------------------
+
+exports.spatiotemporal_metrics = function(image_collection, list_metrics) {
+  
+  var image1 = image_collection.first();
+  var properties = image1.toDictionary(image1.propertyNames());
+  
+  var metrics = ee.ImageCollection(
+    [
+      ee.Image(image_collection.reduce({reducer: "median", parallelScale: 5}))
+                               .set(properties)
+                               .set("metric", "median"),
+      ee.Image(image_collection.reduce({reducer: "mean", parallelScale: 5}))
+                               .set(properties)
+                               .set("metric", "mean"),
+      ee.Image(image_collection.reduce({reducer: "min", parallelScale: 5}))
+                               .set(properties)
+                               .set("metric", "min"),
+      ee.Image(image_collection.reduce({reducer: "max", parallelScale: 5}))
+                               .set(properties)
+                               .set("metric", "max"),
+      ee.Image(image_collection.reduce({reducer: ee.Reducer.stdDev(), parallelScale: 5}))
+                               .set(properties)
+                               .set("metric", "stDev"),
+      ee.Image(image_collection.reduce({reducer: ee.Reducer.percentile([5]), parallelScale: 5}))
+                               .set(properties)
+                               .set("metric", "perclq"),
+      ee.Image(image_collection.reduce({reducer: ee.Reducer.percentile([95]), parallelScale: 5}))
+                               .set(properties)
+                               .set("metric", "percuq"),
+      ee.Image(image_collection.reduce({reducer: ee.Reducer.count(), parallelScale: 5}))
+                               .set(properties)
+                               .set("metric", "count")
+    ]
+    );
+  
+  return metrics.filter(ee.Filter.inList('metric', list_metrics));
+  
+};
+
+
+// Combine two image collections
+// --------------------------------------------------------------------------
+
+
+exports.join_collections = function (image_collection_1, image_collection_2, property_field) {
+  
+  // define properties (Fields)
+  var properties = ee.Filter.equals({
+        leftField: property_field,
+        rightField: property_field
+  });
+  
+  // set up inner join
+  var simpleJoin = ee.Join.inner();
+  var innerJoin = ee.ImageCollection(simpleJoin.apply(image_collection_1, image_collection_2, properties));
+  
+  // apply join
+  var joined_collection = innerJoin.map(function(feature) {
+    return ee.Image.cat(feature.get('primary'), feature.get('secondary'));
+  });
+  
+  return joined_collection;
+};
+
+
+
+
+// Resampling data
+// --------------------------------------------------------------------------
+
+
+exports.resampling = function (image_collection, epsg_target, pixel_size) {
+  function apply_resampling (image) {
+    return image.resample("bilinear")
+                .reproject({crs: epsg_target, scale: pixel_size});
+  }
+  return image_collection.map(apply_resampling);
+};
+
+
+
+// Remove list of images from collection by date
+// --------------------------------------------------------------------------
+
+
+exports.remove_dates = function (image_collection, list_dates){
+  var datelist = list_dates;
+  return image_collection.filter(ee.Filter.inList("DATE_STR", datelist).not());
+
+};
+
+
+
+// Mosaic images from collection by date:
+// --------------------------------------------------------------------------
+
+exports.mosaic_by_date = function (image_collection){
+  // image_collection: An image collection
+  // returns: An image collection
+  var imlist = image_collection.toList(image_collection.size());
+
+  var unique_dates = imlist.map(function(im){
+    return ee.Image(im).date().format("YYYY-MM-dd");
+  }).distinct();
+
+  var mosaic_imlist = unique_dates.map(function(d){
+    d = ee.Date(d);
+
+    var im = image_collection
+      .filterDate(d, d.advance(1, "day"))
+      .mosaic();
+
+    return im.set(
+        "system:time_start", d.millis(), 
+        "system:id", d.format("YYYY-MM-dd"));
+  });
+
+  return ee.ImageCollection(mosaic_imlist);
+};
+
+
+
+
+// Select first images for unique dates, in case multiple observations are present:
+// --------------------------------------------------------------------------
+
+
+exports.first_images = function (image_collection){
+  var distinctDates = image_collection.distinct('DATE_STR').sort('DATE_STR');
+  var filter = ee.Filter.equals({leftField: 'DATE_STR', rightField: 'DATE_STR'});
+  var join = ee.Join.saveAll('date_match');
+  var joinCol = join.apply(distinctDates, image_collection, filter);
+
+  var image_collection_first = ee.ImageCollection(joinCol.map(function(col) {
+    return ee.ImageCollection.fromImages(col.get('date_match')).first();
+  }));
+  
+  return image_collection_first;
+};
+

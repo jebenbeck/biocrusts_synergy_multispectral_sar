@@ -1,0 +1,219 @@
+
+
+
+// PARAMETERS 
+// --------------------------------------------------------------------------
+
+
+// Required tools
+var tools = require('users/fitoprincipe/geetools:tools');
+var batch = require('users/fitoprincipe/geetools:batch');
+var image_processing = require('users/jakobrieser1997/Biocrusts:Functions/Image processing');
+var regional_parameters = require('users/jakobrieser1997/Biocrusts:Functions/Regional parameters');
+var landsat = require('users/jakobrieser1997/Biocrusts:Functions/Landsat');
+var sentinel2 = require('users/jakobrieser1997/Biocrusts:Functions/Sentinel2');
+
+// define time range
+var START_DATE = "2017-01-01";
+var END_DATE = "2021-12-31";
+
+// export options
+var EXPORT_ALL_IMAGES = "NO";
+
+// Define regional parameters
+
+var REGION = "Lieberose";
+
+var PARAMETERS = regional_parameters.get_parameters(REGION);
+print("Parameters " + PARAMETERS.AOI_NAME, PARAMETERS);
+
+
+// Generate analysis-ready Landsat data  
+// --------------------------------------------------------------------------
+
+
+
+// Cast LS bands to S2 values
+var casting_LS_S2 =  function (image) {
+  
+  var bandNames_original = ['B','G','R','NIR'];
+  var bandNames_temp = ['B_new','G_new','R_new','NIR_new'];
+ 
+  var casted_bands = image.select(bandNames_original).multiply(slopes).add(intercepts).float().rename(bandNames_temp);
+  var all_bands = image.addBands(casted_bands);
+  
+  return all_bands.select(bandNames_temp, bandNames_original);
+
+};
+
+//var merged = ee.ImageCollection([imgs2,imgl8]).mean()
+//Map.addLayer(merged ,{min:0,max:0.3000,bands:"red,green,blue"},"merged image")
+
+// Generate Landsat 4, 5, 7, 8 collections: 
+var col_L4_raw = landsat.get_data ("L4", PARAMETERS.AOI, START_DATE, END_DATE);
+var col_L5_raw = landsat.get_data ("L5", PARAMETERS.AOI, START_DATE, END_DATE);
+var col_L7_raw = landsat.get_data ("L7", PARAMETERS.AOI, START_DATE, END_DATE);
+var col_L8_raw = landsat.get_data ("L8", PARAMETERS.AOI, START_DATE, END_DATE);
+
+// Merge collections
+var col_LS_merged = col_L4_raw.merge(col_L5_raw).merge(col_L7_raw).merge(col_L8_raw);
+
+// Sort by date
+var col_LS_merged = col_LS_merged.sort("system:time_start");
+
+// Apply cloud, shadow and snow masking
+var col_LS_masked = col_LS_merged.map(landsat.mask_clear_pixels);
+
+// Cast and select bands:
+var col_LS_casted = col_LS_masked.map(landsat.casting);
+
+// Convert to S2 values:
+var col_LS_casted = col_LS_casted.map(casting_LS_S2);
+
+// Clip to study area
+var col_LS_clipped = image_processing.clipping(col_LS_casted, PARAMETERS.AOI);
+
+// Add the mask cover
+var col_LS_maskcover = image_processing.calculate_clear_area(col_LS_clipped, PARAMETERS.AOI);
+
+// filter the collection by mask cover
+var col_LS_ARD = col_LS_maskcover.filterMetadata('MASK_COVER', 'less_than', 20);
+
+// add indices
+var col_LS_indices = image_processing.indices(col_LS_ARD);
+
+print("Landsat collection ", col_LS_indices);
+
+
+// Generate analysis-ready Sentinel-2 data 
+// --------------------------------------------------------------------------
+
+
+// Generate S2 collection
+var col_s2_raw = sentinel2.get_data (PARAMETERS.AOI, START_DATE, END_DATE);
+
+// Add acqisition dates
+var col_s2_raw = col_s2_raw.map(image_processing.add_date);
+
+// Apply cloud, shadow and snow masking
+var col_s2_masked = col_s2_raw.map(sentinel2.mask_SCL);
+
+// Convert to float
+var col_s2_casted = col_s2_masked.map(sentinel2.casting);
+
+// Clip to study area
+var col_s2_clipped = image_processing.clipping(col_s2_casted, PARAMETERS.AOI);
+
+// Add the mask cover
+var col_s2_maskcover = image_processing.calculate_clear_area(col_s2_clipped, PARAMETERS.AOI);
+
+// filter the collection by mask cover
+var col_s2_ARD = col_s2_maskcover.filterMetadata('MASK_COVER', 'less_than', 20);
+
+// add indices:
+var col_s2_indices = image_processing.indices(col_s2_ARD);
+
+print("Sentinel 2 collection ", col_s2_indices);
+
+
+// Exports
+// --------------------------------------------------------------------------
+
+/****
+// Export metadata table of acquisitons
+Export.table.toDrive({
+  collection: col_s2_indices,
+  folder: 'Acquisitions',
+  description: 'Acquisitions_Sentinel',
+  fileFormat: "CSV",
+  selectors:["DATE_ACQUIRED", "PRODUCT_ID",
+             "SPACECRAFT_NAME", "MASK_COVER"]
+});
+
+// Export metadata table of acquisitons
+Export.table.toDrive({
+  collection: col_LS_indices,
+  folder: 'Acquisitions',
+  description: 'Acquisitions_Landsat',
+  fileFormat: "CSV",
+  selectors:["DATE_ACQUIRED", "LANDSAT_PRODUCT_ID",
+             "SPACECRAFT_ID", "MASK_COVER"]
+});
+
+****/
+
+// 
+// --------------------------------------------------------------------------
+
+
+var test_image_S2 = col_s2_indices.first();
+var test_image_LS = col_LS_indices.first();
+
+
+var resampling_2 = function (image, epsg_target, pixel_size) {
+  return image.reproject({crs: epsg_target, scale: pixel_size});
+};
+
+var res_2_LS = resampling_2(test_image_LS, PARAMETERS.EPSG, 10);
+
+print("original Landsat", test_image_LS);
+print("original Sentinel", test_image_S2);
+print("resampled Landsat NN", res_2_LS);
+
+
+
+
+
+// linear regression
+// --------------------------------------------------------------------------
+
+
+var datelist = ee.List(["2021-09-10", "2020-06-27", "2019-09-21"]);
+
+//Applying date filter
+var col_s2_indices = col_s2_indices.filter(ee.Filter.inList("DATE_ACQUIRED", datelist)); 
+var col_LS_indices = col_LS_indices.filter(ee.Filter.inList("DATE_ACQUIRED", datelist)); 
+
+var s2_test = ee.Image(col_s2_indices.first().select("B"));
+var LS_test = ee.Image(col_LS_indices.first().select("B"));
+
+// Reproject to the finest spatial resolution image
+var selected_crs = LS_test.projection().crs(); 
+var s2_test_rep =  s2_test.resample("bilinear")
+                          .reproject({
+                            crs: selected_crs
+                          }); 
+
+print("reprojected sentinel image", s2_test_rep);
+Map.addLayer(s2_test_rep, {min:-1, max:1}, 'Blue S2 rep');
+
+// make an image for the two variables 
+var pairedImage =  ee.ImageCollection.fromImages([LS_test, s2_test_rep])
+                .toBands().rename(["Blue_LS","Blue_S2"]); 
+
+print("paired Image", pairedImage);
+
+Map.addLayer(pairedImage.select("Blue_LS"), {min:-1, max:1}, 'Blue LS');
+Map.addLayer(pairedImage.select("Blue_S2"), {min:-1, max:1}, 'Blue s2');
+
+
+
+// Generate a sample of points within the region
+var sample = pairedImage.sampleRegions({collection: PARAMETERS.AOI, 
+            scale: 100});
+
+print("sample", sample);
+
+// Generate chart from sample
+var chart = ui.Chart.feature.byFeature(sample, 'Blue_LS', 'Blue_S2')
+                            .setChartType('ScatterChart')
+                            .setOptions({
+                                pointSize: 2,
+                                trendlines: { 0: {showR2: true, visibleInLegend: true} , 
+                                              1: {showR2: true, visibleInLegend: true}}
+                                });
+
+print("chart",chart);
+
+
+

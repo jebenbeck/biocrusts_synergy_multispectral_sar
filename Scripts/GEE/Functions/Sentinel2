@@ -1,0 +1,187 @@
+/******************************************************************************
+
+Sentinel-2 Processing
+
+Description:
+Functions useful to process Landsat time series data.
+
+Implemented:
+  - Get raw S2 datasets 
+  - rename bands
+  - cloud, shadow and snow masking based
+  - casting of image values
+  - selection of needed bands
+
+
+Returns:
+  - analysis-ready datased
+
+To do:
+  - 
+
+How to use:
+
+*******************************************************************************/
+
+
+
+// GET SENTINEL-2 COLLECTION 
+// --------------------------------------------------------------------------
+
+
+exports.get_data = function(aoi, start_date, end_date) {
+
+    return ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+        .filterBounds(aoi)                  // only images covering the AOI
+        .filterDate(start_date, end_date);  // date filter
+  
+};
+
+
+// MASK CLOUDS, SHADOWS, CIRRUS AND SNOW  
+// --------------------------------------------------------------------------
+
+
+// Masking clouds, shadow, cirrus and snow using SCL-Layer band:
+exports.mask_SCL = function (image) {
+  
+  var cld = require('users/fitoprincipe/geetools:cloud_masks');
+  var masked = cld.sclMask([//'cloud_low', 
+                            //'cloud_medium', 
+                            //'cloud_high', 
+                            //'shadow', 
+                            'snow', 
+                            'cirrus'])(image);
+  return image.updateMask(masked);
+
+};
+
+
+
+// MASK CLOUDS, SHADOWS, CIRRUS using s2_cloudless
+// --------------------------------------------------------------------------
+
+
+exports.mask_s2_cloudless = function (image_collection, aoi, start_date, end_date,
+                                      CLD_PRB_THRESH, NIR_DRK_THRESH, CLD_PRJ_DIST, BUFFER) {
+
+
+  function get_s2_sr_cld_col (image_collection, aoi, start_date, end_date){
+    // # Import and filter s2cloudless.
+    var s2_cloudless_col = (ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY')
+          .filterBounds(aoi)
+          .filterDate(start_date, end_date))
+
+    // # Join the filtered s2cloudless collection to the SR collection by the 'system:index' property.
+    return ee.ImageCollection(ee.Join.saveFirst('s2cloudless')
+                                     .apply({
+                                             'primary': image_collection,
+                                             'secondary': s2_cloudless_col,
+                                             'condition': ee.Filter.equals({
+                                                 'leftField': 'system:index',
+                                                 'rightField': 'system:index'
+                                                 })
+                                      }));
+  
+  }
+  
+  
+  function add_cloud_bands(img) {
+    // # Get s2cloudless image, subset the probability band.
+    var cld_prb = ee.Image(img.get('s2cloudless')).select('probability')
+
+    // # Condition s2cloudless by the probability threshold value.
+    var is_cloud = cld_prb.gt(CLD_PRB_THRESH).rename('clouds')
+
+    // # Add the cloud probability layer and cloud mask as image bands.
+    return img.addBands(ee.Image([cld_prb, is_cloud]))
+    
+  }
+  
+  
+  function add_shadow_bands(img) {
+      // # Identify water pixels from the SCL band.
+      var not_water = img.select('SCL').neq(6)
+  
+      // # Identify dark NIR pixels that are not water (potential cloud shadow pixels).
+      var SR_BAND_SCALE = 1e4
+      var dark_pixels = img.select('B8').lt(NIR_DRK_THRESH*SR_BAND_SCALE).multiply(not_water).rename('dark_pixels')
+
+      // # Determine the direction to project cloud shadow from clouds (assumes UTM projection).
+      var shadow_azimuth = ee.Number(90).subtract(ee.Number(img.get('MEAN_SOLAR_AZIMUTH_ANGLE')));
+
+      // # Project shadows from clouds for the distance specified by the CLD_PRJ_DIST input.
+      var cld_proj = (img.select('clouds').directionalDistanceTransform(shadow_azimuth, CLD_PRJ_DIST*10)
+          .reproject({'crs': img.select(0).projection(), 'scale': 100})
+          .select('distance')
+          .mask()
+          .rename('cloud_transform'))
+
+      // # Identify the intersection of dark pixels with cloud shadow projection.
+      var shadows = cld_proj.multiply(dark_pixels).rename('shadows')
+
+      // # Add dark pixels, cloud projection, and identified shadows as image bands.
+      return img.addBands(ee.Image([dark_pixels, cld_proj, shadows]))
+    
+  }
+
+
+  function add_cld_shdw_mask(img) {
+      // # Add cloud component bands.
+      var img_cloud = add_cloud_bands(img)
+
+      // # Add cloud shadow component bands.
+      var img_cloud_shadow = add_shadow_bands(img_cloud)
+
+      // # Combine cloud and shadow mask, set cloud and shadow as value 1, else 0.
+      var is_cld_shdw = img_cloud_shadow.select('clouds').add(img_cloud_shadow.select('shadows')).gt(0)
+
+      // # Remove small cloud-shadow patches and dilate remaining pixels by BUFFER input.
+      // # 20 m scale is for speed, and assumes clouds don't require 10 m precision.
+      is_cld_shdw = (is_cld_shdw.focal_min(2).focal_max(BUFFER*2/20)
+          .reproject({'crs': img.select([0]).projection(), 'scale': 20})
+          .rename('cloudmask'))
+
+      // # Add the final cloud-shadow mask to the image.
+      return img_cloud_shadow.addBands(is_cld_shdw)
+  
+  }
+
+
+  function apply_cld_shdw_mask(img) {
+      // # Subset the cloudmask band and invert it so clouds/shadow are 0, else 1.
+      var not_cld_shdw = img.select('cloudmask').not()
+      
+      var bandlist_mask = ee.List.sequence(0, 11, 1);	
+      var bandlist_not_mask = ee.List.sequence(12, 22, 1);	
+      
+      // # Subset reflectance bands and update their masks, return the result.
+      return img.select(bandlist_mask).updateMask(not_cld_shdw)
+                .addBands(img.select(bandlist_not_mask))
+  }
+
+  var s2_cld_col = get_s2_sr_cld_col(image_collection, aoi, start_date, end_date);
+
+  var s2_all_masks_col = s2_cld_col.map(add_cld_shdw_mask);
+
+  var s2_masked_col = s2_all_masks_col.map(apply_cld_shdw_mask);
+  
+  return s2_masked_col;
+
+}
+
+
+// Casting and select
+// --------------------------------------------------------------------------
+
+
+// Cast, select and convert needed bands to float
+
+exports.casting = function (image) {
+    var casted_images = image.select(['B2','B3','B4', 'B8'])
+                             .divide(10000)
+                             .rename(["B", "G", "R", "NIR"])
+                             .toFloat();
+    var all_images = image.addBands(casted_images);
+    return all_images.select(["B", "G", "R", "NIR"]);
+};

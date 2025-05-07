@@ -1,0 +1,72 @@
+/**
+ * Function to mask clouds using the Sentinel-2 QA band
+ * @param {ee.Image} image Sentinel-2 image
+ * @return {ee.Image} cloud masked Sentinel-2 image
+ */
+
+var cld = require('users/fitoprincipe/geetools:cloud_masks');
+ 
+ 
+// Load in ROI
+var my_aoi = ee.FeatureCollection('users/jakobrieser1997/Biocrusts/AOI_Lieberose');
+
+// #############################################################
+// Functions
+
+// function for cloud masking using scene classification band:
+function maskclouds_SCL(image){
+    var masked = cld.sclMask(['cloud_low', 'cloud_medium', 'cloud_high', 'shadow', 'snow','cirrus'])(image);
+    return masked.divide(10000);
+  }
+
+// function for cloud masking using QA60 by fito:
+function maskclouds_QA60_2(image){
+    var masked = cld.sentinel2()(image);
+    return masked.divide(10000);
+  }
+
+
+// #############################################################
+// Application
+
+var s2_col = ee.ImageCollection("COPERNICUS/S2_SR")
+  .filterBounds(my_aoi)
+  .filterDate('2017-04-13', '2017-04-15'); //for clouds
+  //.filterDate('2017-12-09', '2021-12-11'); //for snow
+  //.filterDate('2018-03-19', '2018-03-21'); //for cirrus
+
+// apply cloud mask based on SCL:  
+var s2_col_SCL = s2_col.map(maskclouds_SCL);
+
+// apply cloud mask based on QA60 2:  
+var s2_col_QA60_2 = s2_col.map(maskclouds_QA60_2);
+
+
+
+// #############################################################
+// Visualization
+
+
+print("Raw collection", s2_col);
+print("Masked collection SCL", s2_col_SCL);
+print("Masked collection QA60", s2_col_QA60_2);
+
+var visualization_raw = {
+  min: 0,
+  max: 3000,
+  bands: ['B4', 'B3', 'B2'],
+};
+
+var visualization_masked = {
+  min: 0.0,
+  max: 0.3,
+  bands: ['B4', 'B3', 'B2'],
+};
+
+
+Map.addLayer(s2_col.first(), visualization_raw, 'Raw');
+Map.addLayer(s2_col_SCL.first(), visualization_masked, 'Masked SCL');
+Map.addLayer(s2_col_QA60_2.first(), visualization_masked, 'Masked QA60 2');
+
+Map.addLayer(my_aoi, {}, 'AOI');
+Map.centerObject(my_aoi);

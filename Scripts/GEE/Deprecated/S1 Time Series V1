@@ -1,0 +1,448 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var geometry = 
+    /* color: #98ff00 */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[34.121408934437746, 31.264566914786815],
+          [34.121408934437746, 30.751379682432688],
+          [34.678965086781496, 30.751379682432688],
+          [34.678965086781496, 31.264566914786815]]], null, false);
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+// GEE PROCESSING OF S-1 GRD IMAGERY, PROCESSING OF SPATIO-TEMPORAL METRICS AND OPTIONAL DROPPING OF SINGLE IMAGES
+// T. ULLMANN 2021
+var y_start = 2021;
+var y_end = 2021;
+var m_start = 1;
+var m_end = 3;
+var ORBITMODE = 'DESCENDING'; // 'ASCENDING' or 'DESCENDING'
+var epsg = 'EPSG:32636';  // PROJECTION --> Chile (EPSG:32719)
+var region = 'Negev';   // STUDY AREA IDENTIFIER
+var outputfolder='Negev'; // OUTPUTFOLDER ON DRIVE
+var orbnr   = 94; // RELATIVE ORBIT NUMBER
+var orbnrs = '94'; // RELATIVE ORBIT NUMBER AS STRING
+
+//var roi = geometry; // OR --> ee.Geometry.Rectangle([-63.0, 9.2, -63.1, 9.3]);
+
+var aoi = ee.FeatureCollection('users/jakobrieser1997/Biocrusts/AOI_Negev');
+var ftr = ee.Feature(aoi.first());
+var roi = ftr.buffer(20000).geometry().bounds();
+
+print("ROI_1", roi); 
+//print("ROI_2", roi_2); 
+Map.addLayer(aoi, {color: "yellow"});
+
+var terrainflattening = 'NO'; // 'YES' OR 'NO' APPLY TERRAIN FLATTENING
+var dem_data = ee.Image('NASA/NASADEM_HGT/001')  // DEM FOR TERRAIN FLATTENING - DEFAULT DEM: SRTM 30m
+var resampling = 'YES'; // 'YES' OR 'NO' APPLY RESAMPLING TO NEW PIXEL SIZE
+var resample_size = 10; // RESAMPLED PIXEL SIZE IN METER
+var dropallimages = 'YES'; // 'YES' OR 'NO' EXPORT ALL IMAGES TO DRIVE
+var justpoints= 'NO'; // Requires Asset of Points - Extract Values of the Time Series for all locations
+var batch = require('users/fitoprincipe/geetools:batch'); // FUNCTION FOR DROPPING SINGLE IMAGES TO DRIVE
+var outputresolution = 10; // In Meter
+// function slope correction
+var slope_lib = require('users/filetransferullmann/SARprocessor:radiometric-slope-correction');
+
+
+// #############################################################
+// FUNCTIONS
+
+// ########## MOSAIC BY DATE
+function mosaicByDate(imcol){
+  // imcol: An image collection
+  // returns: An image collection
+  var imlist = imcol.toList(imcol.size());
+
+  var unique_dates = imlist.map(function(im){
+    return ee.Image(im).date().format("YYYY-MM-dd");
+  }).distinct();
+
+  var mosaic_imlist = unique_dates.map(function(d){
+    d = ee.Date(d);
+
+    var im = imcol
+      .filterDate(d, d.advance(1, "day"))
+      .mosaic();
+      
+        return im.set(
+        "system:time_start", d.millis(), 
+        "system:id", d.format("YYYY-MM-dd"), 
+        "system:index", d.format("YYYY-MM-dd"));
+  });
+  return ee.ImageCollection(mosaic_imlist);
+}
+
+
+
+// functions to convert from/to dB
+function toNatural(img) {
+  var converted = ee.Image(10.0).pow(img.select(0).divide(10.0));
+  return converted.copyProperties(img).copyProperties(img, ['system:time_start']).copyProperties(img, ['system:DOY']);
+}
+function toDB(img) {
+  return ee.Image(img).log10().multiply(10.0).copyProperties(img).copyProperties(img, ['system:time_start']);
+}
+
+
+// ##############################################################
+// MAIN PROGRAM
+// DATE STRING
+var date = y_start + '_' + m_start + '__' + y_end + '_' + m_end; // FILENAME SUFFIX
+
+
+// SELECT IMAGE COLLECTION - VV AND VH
+var imgVV = ee.ImageCollection('COPERNICUS/S1_GRD')
+        .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+        .filter(ee.Filter.eq('instrumentMode', 'IW'))
+        .filter(ee.Filter.eq('orbitProperties_pass', ORBITMODE))
+        .filter(ee.Filter.eq('resolution', 'H'))
+        .filter(ee.Filter.eq('relativeOrbitNumber_stop', orbnr))
+ //       .filter(ee.Filter.eq('resolution_meters', 10))
+        .select('VV', 'angle')
+        .filterBounds(aoi)
+        .filter(ee.Filter.calendarRange(m_start,m_end,'month'))
+        .filter(ee.Filter.calendarRange(y_start,y_end,'year'))
+        .map(function(image) {
+          var edge = image.lt(-50.0);
+          var maskedImage = image.mask().and(edge.not());
+          image.updateMask(maskedImage);
+          return image.clip(roi);
+        });
+  
+var imgVH = ee.ImageCollection('COPERNICUS/S1_GRD')
+        .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+        .filter(ee.Filter.eq('instrumentMode', 'IW'))
+        .filter(ee.Filter.eq('orbitProperties_pass', ORBITMODE))
+        .filter(ee.Filter.eq('resolution', 'H'))
+        .filter(ee.Filter.eq('relativeOrbitNumber_stop', orbnr))
+//        .filter(ee.Filter.eq('resolution_meters', 25))
+        .select('VH','angle')
+        .filterBounds(aoi)
+        .filter(ee.Filter.calendarRange(m_start,m_end,'month'))
+        .filter(ee.Filter.calendarRange(y_start,y_end,'year'))
+        .map(function(image) {
+          var edge = image.lt(-50.0);
+          var maskedImage = image.mask().and(edge.not());
+          image.updateMask(maskedImage);
+          return image.clip(roi);
+        });
+print ("Raw VH", imgVH);
+
+
+// TERRAIN FLATTENING
+if (terrainflattening == 'YES') {
+function filter_img(img) {
+    var minMax =  ee.Terrain.aspect(img.select('angle')).reduceRegion(ee.Reducer.mean(), img.geometry(), 1000);
+    return img.set({
+      roi_mean: minMax.get('aspect')
+    });
+}
+var imgVV = imgVV.map(filter_img);
+var imgVV = imgVV.filterMetadata('roi_mean', 'not_equals', null)
+var imgVH = imgVH.map(filter_img);
+var imgVH = imgVH.filterMetadata('roi_mean', 'not_equals', null)
+var param1 = {'model': 'volume', 
+    'elevation': dem_data,
+    'buffer': 25,      // buffer in meter
+    'selected_band': 'VV'}
+var param2 = {'model': 'volume', 
+    'elevation': dem_data,
+    'buffer': 25,      // buffer in meter
+    'selected_band': 'VH'}
+var imgVV = slope_lib.slope_correction(imgVV, param1);
+var imgVH = slope_lib.slope_correction(imgVH, param2);
+}
+print ("flattened VH", imgVH);
+
+
+
+// CONVERT TO LINEAR
+var imgVH = imgVH.map(toNatural);
+var imgVV = imgVV.map(toNatural);
+
+print ("linear VH", imgVH);
+
+// MEDIAN FILTER
+var filterSpeckles = function(img) {
+  var smoothed = img.focal_median(1.5,'square','pixels'); 
+  return smoothed.copyProperties(img).copyProperties(img, ['system:time_start']);
+};
+
+var imgVH = imgVH.map(filterSpeckles);
+var imgVV = imgVV.map(filterSpeckles);
+
+print ("filtered VH", imgVH);
+
+// RESAMPLE TO NEW PIXEL SIZE
+if (resampling == 'YES') {
+epsg = imgVH.first().select(0).projection().crs().getInfo();
+var resample = function(image) {
+  var resampled = image.resample("bilinear")
+  .reproject({crs: epsg, scale: resample_size});
+  return resampled;
+};
+var imgVH = imgVH.map(resample);
+var imgVV = imgVV.map(resample);
+}
+
+print ("resampled", imgVH);
+
+// CONVERT BACK TO DB
+var imgVH = imgVH.map(toDB);
+var imgVV = imgVV.map(toDB);
+
+
+// MOSAIC IMAGES
+var imgVH=mosaicByDate(imgVH);
+var imgVV=mosaicByDate(imgVV);
+
+var imgVH = imgVH.map(function(img) {var named = img.rename('VH');
+                                    return named});
+var imgVV = imgVV.map(function(img) {var named = img.rename('VV');
+                                    return named});
+
+print ("mosaicked VH", imgVH);
+
+
+
+/*****
+
+
+// SPATIO TEMPORAL METRICS
+if (dropallimages == 'NO') {
+    
+  var medianVV = imgVV.median();
+  var meanVV = imgVV.mean();
+  var minVV = imgVV.min();
+  var maxVV = imgVV.max();
+  var perclqVV = imgVV.reduce(ee.Reducer.percentile([5]));
+  var percuqVV = imgVV.reduce(ee.Reducer.percentile([95]));
+  var stdevVV = imgVV.reduce(ee.Reducer.stdDev());
+  var nobsVV = imgVV.reduce(ee.Reducer.count());
+  
+  var medianVH = imgVH.median();
+  var meanVH = imgVH.mean();
+  var minVH = imgVH.min();
+  var maxVH = imgVH.max();
+  var perclqVH = imgVH.reduce(ee.Reducer.percentile([5]));
+  var percuqVH = imgVH.reduce(ee.Reducer.percentile([95]));
+  var stdevVH = imgVH.reduce(ee.Reducer.stdDev());
+  var nobsVH = imgVH.reduce(ee.Reducer.count());
+}
+
+
+
+// DRAW IMAGES TO MAP
+if (dropallimages == 'NO') {
+Map.addLayer(meanVH, {min:-30, max:0}, 'VH_mean');
+Map.addLayer(meanVV, {min:-25, max:5}, 'VV_mean');
+Map.addLayer(stdevVH, {min:0, max:6}, 'VH_stdev');
+Map.addLayer(stdevVV, {min:0, max:6}, 'VV_stdev');
+}
+
+
+// EXPORTS
+
+if (dropallimages == 'NO') {
+    
+    
+  Export.image.toDrive({
+    image: medianVV,
+    description: 'S1_MedianVV'+ '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+    scale: outputresolution,
+    crs: epsg,
+    folder: outputfolder+'VV',
+    region: roi,
+  });
+  
+  Export.image.toDrive({
+    image: meanVV,
+    description: 'S1_MeanVV'+ '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+    scale: outputresolution,
+    crs: epsg,
+    folder: outputfolder+'VV',
+    region: roi,
+  });
+  
+  Export.image.toDrive({
+    image: minVV,
+    description: 'S1_MinVV'+ '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+    scale: outputresolution,
+    crs: epsg,
+    folder: outputfolder+'VV',
+    region: roi,
+  });
+  
+  Export.image.toDrive({
+    image: maxVV,
+    description: 'S1_MaxVV'+ '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+    scale: outputresolution,
+    crs: epsg,
+    folder: outputfolder+'VV',
+    region: roi,
+  });
+  
+  Export.image.toDrive({
+     image: perclqVV,
+     description: 'S1_Perc05VV'+ '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+     scale: outputresolution,
+     crs: epsg,
+     folder: outputfolder+'VV',
+     region: roi,
+   });
+  
+   Export.image.toDrive({
+     image: percuqVV,
+     description: 'S1_Perc95VV'+ '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+     scale: outputresolution,
+     crs: epsg,
+     folder: outputfolder+'VV',
+    region: roi,
+   });
+  
+  Export.image.toDrive({
+    image: stdevVV,
+    description: 'S1_StDevVV'+ '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+    scale: outputresolution,
+    crs: epsg,
+    folder: outputfolder+'VV',
+    region: roi,
+  });
+  
+  Export.image.toDrive({
+    image: nobsVV,
+    description: 'S1_NobsVV'+ '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+    scale: outputresolution,
+    crs: epsg,
+    folder: outputfolder+'VV',
+    region: roi,
+  });
+  
+  
+  
+  
+  Export.image.toDrive({
+    image: medianVH,
+    description: 'S1_MedianVH' + '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+    scale: outputresolution,
+    crs: epsg,
+    folder: outputfolder+'VH',
+    region: roi,
+  });
+  
+  Export.image.toDrive({
+    image: meanVH,
+    description: 'S1_MeanVH'+ '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+    scale: outputresolution,
+    crs: epsg,
+    folder: outputfolder+'VH',
+    region: roi,
+  });
+  
+  Export.image.toDrive({
+    image: minVH,
+    description: 'S1_MinVH'+ '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+    scale: outputresolution,
+    crs: epsg,
+    folder: outputfolder+'VH',
+    region: roi,
+  });
+  
+  Export.image.toDrive({
+    image: maxVH,
+    description: 'S1_MaxVH'+ '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+    scale: outputresolution,
+    crs: epsg,
+    folder: outputfolder+'VH',
+    region: roi,
+  });
+  
+   Export.image.toDrive({
+     image: perclqVH,
+     description: 'S1_Perc05VH'+ '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+     scale: outputresolution,
+     crs: epsg,
+     folder: outputfolder+'VH',
+     region: roi,
+   });
+  
+   Export.image.toDrive({
+     image: percuqVH,
+     description: 'S1_Perc95VH'+ '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+     scale: outputresolution,
+     crs: epsg,
+     folder: outputfolder+'VH',
+     region: roi,
+   });
+  
+  Export.image.toDrive({
+    image: stdevVH,
+    description: 'S1_StDevVH'+ '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+    scale: outputresolution,
+    crs: epsg,
+    folder: outputfolder+'VH',
+    region: roi,
+  });
+  
+  Export.image.toDrive({
+    image: nobsVH,
+    description: 'S1_NobsVH'+ '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+    scale: outputresolution,
+    crs: epsg,
+    folder: outputfolder+'VH',
+    region: roi,
+  });
+  
+
+}
+*****/
+
+// ALLOW DOWNLOADING SINGLE DATES
+if (dropallimages == 'YES') {
+  
+  batch.Download.ImageCollection.toDrive(imgVH, outputfolder +'_VH_' + ORBITMODE+ '_' + orbnrs, 
+                {name: "{system_date}" + "_" + 'S1_VH'+ '_' + outputfolder + '_'+ terrainflattening,
+                scale: outputresolution, 
+                crs: epsg,
+                region: aoi});
+                
+}
+/*****
+
+// GET VALUES FOR MULTIPLE POINTS
+if (justpoints == 'YES') {
+ 
+ var sampleVV = imgVV.getRegion(table2, outputresolution);
+ print (sampleVV);
+ var fetVV = ee.FeatureCollection(sampleVV
+                          .map(function(element){
+                          return ee.Feature(null,{prop:element})}));
+
+  var sampleVH = imgVH.getRegion(table2, outputresolution);
+ print (sampleVH);
+ var fetVH = ee.FeatureCollection(sampleVH
+                          .map(function(element){
+                          return ee.Feature(null,{prop:element})}));
+                          
+  
+  Export.table.toDrive({
+  collection: fetVV, 
+  description: 'S1_TimeSeriesVV_Locations'+ '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+  folder: outputfolder+'VV',
+  fileFormat: 'CSV'
+  });
+  
+  Export.table.toDrive({
+  collection: fetVH, 
+  description: 'S1_TimeSeriesVH_Locations'+ '_' + ORBITMODE + '_'+'RELORB-' + orbnr + '_' + region + '_' + date,
+  folder: outputfolder+'VH',
+  fileFormat: 'CSV'
+  });
+}
+
+
+*****/

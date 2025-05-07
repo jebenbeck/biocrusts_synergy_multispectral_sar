@@ -1,0 +1,157 @@
+/******************************************************************************
+
+Sentinel 1 Time Series
+
+Description:
+Generates a time series of all available Sentinel 1 scenes
+
+Implemented:
+
+To do:
+- add dates to the features
+- implement acquisition table
+
+*******************************************************************************/
+
+
+
+// PARAMETERS 
+// --------------------------------------------------------------------------
+
+
+// Required tools
+var batch = require('users/fitoprincipe/geetools:batch'); // for exporting single images to drive
+var flattening = require('users/filetransferullmann/SARprocessor:radiometric-slope-correction'); // for terrain flattening
+var regional_parameters = require('users/jakobrieser1997/Biocrusts:Functions/Regional parameters');
+var image_processing = require('users/jakobrieser1997/Biocrusts:Functions/Image processing');
+var sentinel1 = require('users/jakobrieser1997/Biocrusts:Functions/Sentinel1');
+var slope_lib = require('users/filetransferullmann/SARprocessor:radiometric-slope-correction');
+
+// Timeframe:
+var START_DATE = "2017-01-01";
+var END_DATE = "2021-12-31";
+
+// Sentinel 1 specific processing options
+var TERRAIN_FLATTENING = "YES";
+var RESAMPLING = "NO";
+var OUTPUT_RESOLUTION = 10;
+var CUTOFF = -50.0;
+
+// Export options:
+var EXPORT_TABLE = "YES";
+var EXPORT_ALL_IMAGES = "NO";
+var EXPORT_METRICS = "NO";
+
+// Study area:
+var REGION = "Negev";
+var PARAMETERS = regional_parameters.get_parameters(REGION);
+print("Parameters " + PARAMETERS.AOI_NAME, PARAMETERS);
+
+
+
+// APPLICATION 
+// --------------------------------------------------------------------------
+
+// AOI 20 km buffer BBox 
+var ROI = ee.Feature(PARAMETERS.AOI.first()).buffer(20000).geometry().bounds();
+
+// Generate S2 collection
+var col_VV = sentinel1.get_data("VV", PARAMETERS.AOI, ROI, PARAMETERS.S1_ORBITMODE, 
+                        PARAMETERS.S1_ORBITNUMBER, START_DATE, END_DATE, CUTOFF);
+var col_VH = sentinel1.get_data("VH", PARAMETERS.AOI, ROI, PARAMETERS.S1_ORBITMODE, 
+                        PARAMETERS.S1_ORBITNUMBER, START_DATE, END_DATE, CUTOFF);
+
+// apply terrain flattening:
+if (TERRAIN_FLATTENING == "YES") {
+  var col_VV = sentinel1.terrain_flattening (col_VV, "VV");
+  var col_VH = sentinel1.terrain_flattening (col_VH, "VH");
+}
+
+// Convert data to linear:
+var col_VV = col_VV.map(sentinel1.toNatural);
+var col_VH = col_VH.map(sentinel1.toNatural);
+
+// Speckle filtering using median filter:
+var col_VV = col_VV.map(sentinel1.speckle_filter);
+var col_VH = col_VH.map(sentinel1.speckle_filter);
+
+// Resampling:
+if (RESAMPLING == "YES") {
+  var col_VV = image_processing.resampling(col_VV, PARAMETERS.EPSG, OUTPUT_RESOLUTION);
+  var col_VH = image_processing.resampling(col_VH, PARAMETERS.EPSG, OUTPUT_RESOLUTION);
+}
+
+// convert back to dB:
+var col_VV = col_VV.map(sentinel1.todB);
+var col_VH = col_VH.map(sentinel1.todB);
+
+// join VV and VH collections:
+var col_S1_joined = image_processing.join_collections(col_VV, col_VH, "system:index");
+
+// Add acqisition dates
+var col_S1_joined = col_S1_joined.map(image_processing.add_date);
+
+// add mathematical band combinations
+var col_S1_mbcs = sentinel1.calculate_mbcs(col_S1_joined);
+
+// Clip to study area
+var col_S1_aoi = image_processing.clipping(col_S1_mbcs, PARAMETERS.AOI);
+
+//calculate spatiotemporal_metrics
+var col_S1_metrics = image_processing.spatiotemporal_metrics(col_S1_aoi, 
+      ["median", "stDev", "perclq", "percuq"]);
+
+
+
+// VISUALIZSATION 
+// --------------------------------------------------------------------------
+
+
+print("Joined", col_S1_joined);
+print("MBCs", col_S1_aoi);
+print("Metrics", col_S1_metrics);
+
+
+
+// EXPORT DATA 
+// --------------------------------------------------------------------------
+
+
+// Export metadata table of acquisitons
+if (EXPORT_TABLE == "YES") {
+  Export.table.toDrive({
+    collection: col_S1_aoi,
+    folder: 'Master Thesis Acquisitions',
+    description: "Acquisitions_Sentinel_1_" + PARAMETERS.AOI_NAME,
+    fileFormat: "CSV",
+    selectors:["DATE_STR", "DATE_TIME", "familyName", "platform_number"]
+  });
+}
+
+// Export all individual images
+if (EXPORT_ALL_IMAGES == 'YES') {
+  batch.Download.ImageCollection.toDrive(col_S1_aoi, 
+                                         "Sentinel-1_" + PARAMETERS.AOI_NAME,
+                  {name: "{system_date}" + "_" + 
+                          "Sentinel-1" + "_" + 
+                          PARAMETERS.AOI_NAME,
+                    scale: OUTPUT_RESOLUTION,
+                    region: PARAMETERS.AOI,
+                    crs: PARAMETERS.EPSG,
+                    type: 'float'});
+}
+
+// Export metrics
+if (EXPORT_METRICS == 'YES') {
+  batch.Download.ImageCollection.toDrive(col_S1_metrics, 
+                                         "Sentinel-1_" + PARAMETERS.AOI_NAME,
+                  {name: "{metric}" + "_" +
+                       "Sentinel-1" + "_" +
+                       PARAMETERS.AOI_NAME +"_" +
+                       START_DATE + "_" + 
+                       END_DATE,
+                  scale: OUTPUT_RESOLUTION,
+                  region: PARAMETERS.AOI,
+                  crs: PARAMETERS.EPSG,
+                  type: 'float'});
+}

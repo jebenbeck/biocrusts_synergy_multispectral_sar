@@ -1,0 +1,102 @@
+// PARAMETERS 
+// --------------------------------------------------------------------------
+
+
+// Required tools
+var cld = require('users/fitoprincipe/geetools:cloud_masks'); // required for cloud masking using SCL
+var tools = require('users/fitoprincipe/geetools:tools');
+var batch = require('users/fitoprincipe/geetools:batch');
+
+// define time range
+var START_DATE = "2021-10-09";
+var END_DATE = "2021-12-31";
+
+// Define regional parameters
+var AOI = ee.FeatureCollection('users/jakobrieser1997/SA_Lieberose'); 
+
+
+// FUNCTIONS 
+// --------------------------------------------------------------------------
+
+
+// Load in Sentinel 2 Level-2A surface reflectance image collection
+function get_s2_col(aoi, start_date, end_date) {
+    return ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+        .filterBounds(aoi)                  // only images covering the AOI
+        .filterDate(start_date, end_date);  // date filter
+}
+
+// cloud masking using SCL-layer
+function mask_clouds_shadows_snow(image){
+    var masked = cld.sclMask(['cloud_low', 'cloud_medium', 'cloud_high', 'shadow', 'snow','cirrus'])(image);
+    return image.updateMask(masked);
+  }
+
+// Cast, select and convert needed bands to float
+var casting = function(image) {
+    var casted_images = image.select(['B2','B3','B4', 'B8'])
+                             .divide(10000)
+                             .rename(["B", "G", "R", "NIR"])
+                             .toFloat();
+    var all_images = image.addBands(casted_images);
+    return all_images.select(["B", "G", "R", "NIR"]);
+};
+
+// Clip the images to the AOI
+var clipping = function(image) {
+    return image.clip(AOI);
+    };
+
+// Add mask cover (%) property to all images
+var add_mask_cover = function(image) {
+  var mask_cover = tools.image.maskCover(image, AOI);
+  return image.set('MASK_COVER', mask_cover);
+};
+
+
+
+// APPLICATION 
+// --------------------------------------------------------------------------
+
+
+
+// Generate S2 collection
+var col_s2_raw = get_s2_col(AOI, START_DATE, END_DATE);
+
+// Apply cloud, shadow and snow masking
+var col_s2_masked = col_s2_raw.map(mask_clouds_shadows_snow);
+
+// Convert to float
+var col_s2_casted = col_s2_masked.map(casting);
+
+// Clip to study area
+var col_s2_clipped = col_s2_casted.map(clipping);
+
+// Add the mask cover
+var col_s2_maskcover = col_s2_clipped.map(add_mask_cover);
+
+// filter the collection by mask cover
+var col_s2_ARD = col_s2_maskcover.filterMetadata('MASK_COVER', 'less_than', 20);
+
+
+var indices = require('users/jakobrieser1997/Biocrusts:Exported_functions/Indices');
+
+var col_s2_indices = indices.add_indices(col_s2_ARD);
+
+
+
+// Visualization 
+// --------------------------------------------------------------------------
+
+
+print(col_s2_ARD);
+print(col_s2_indices);
+
+Map.addLayer(col_s2_indices.first().select("NDVI"), {palette: ['red', 'khaki', 'green'], min:-1, max:1}, 'NDVI');
+Map.addLayer(col_s2_indices.first().select("CI"), {palette: ['red', 'khaki', 'green'], min:0, max:1}, 'CI');
+Map.addLayer(col_s2_indices.first().select("mCI"), {palette: ['red', 'khaki', 'green'], min:0, max:1.5}, 'mCI');
+Map.addLayer(col_s2_indices.first().select("BSCI"), {palette: ['red', 'khaki', 'green'], min:0, max:30}, 'BSCI');
+
+Map.addLayer(col_s2_indices.first(), {min: 0.0, max: 0.3, bands: ['R', 'G', 'B'],}, 'RGB');
+
+Map.centerObject(AOI);

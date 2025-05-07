@@ -1,0 +1,75 @@
+// Load in ROI
+var my_aoi = ee.FeatureCollection('users/jakobrieser1997/SA_Lieberose');
+
+
+///// ----------------------- \\\\\
+/// Prepare Landsat Collections \\\
+///// ----------------------- \\\\\
+
+
+// Define functions to select and rename bands for Landsat-8
+function renameBandsOLI(image) {
+    var bands = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7'];
+    var new_bands = ['B', 'G', 'R', 'NIR', 'SWIR1', 'SWIR2'];
+    return image.select(bands).rename(new_bands);
+}
+
+// Mask clouds, snow and cloud shadows based on the pixel_qa band
+var cloudMask = function (image) {
+  // Get the pixel QA band.
+  var qa = image.select('pixel_qa');
+  // Bits 3 and 5 are cloud shadow and cloud, respectively.
+  // Use LeftShift-Operators to define Bit values
+  var CloudShadowBitValue = 8; //(1 << 3);
+  var CloudBitValue = 32; //(1 << 5);
+  // Create masks
+  var shadow_mask = qa.bitwiseAnd(CloudShadowBitValue).eq(0);
+  var cloud_mask = qa.bitwiseAnd(CloudBitValue).eq(0);
+  // Given bit values should be set to zero for masking.
+  var final_mask = shadow_mask.and(cloud_mask);
+  return image.updateMask(final_mask);
+};
+
+// Load an Landsat-8 ImageCollection.
+var L8_col = ee.ImageCollection('LANDSAT/LC08/C01/T1_SR')
+  .filterBounds(my_aoi)
+  .map(cloudMask)
+  .map(renameBandsOLI)
+  .filter(ee.Filter.calendarRange(6,9,'month'))
+  .filter(ee.Filter.calendarRange(2019,2020,'year'))
+  .map(function(image){return image.clip(my_aoi)});
+
+// sort by cloud cover:
+//var L8_col = L8_col.sort("CLOUD_COVER", false);
+
+
+print(L8_col);
+
+// Import geetools
+var tools = require('users/fitoprincipe/geetools:tools');
+
+// Add MASK_COVER property for all images in the collection
+var addMaskCover = function(image) {
+  var maskCover = tools.image.maskCover(image, my_aoi);
+  return image.set('MASK_COVER', maskCover);
+};
+
+var colWithMaskCover = L8_col.map(addMaskCover);
+
+print("L8_col_maskcover", colWithMaskCover);
+
+
+// filter the collection by MASK_COVER
+var newFiltered = colWithMaskCover.filterMetadata('MASK_COVER', 'less_than', 10);
+
+// Visualization parameters
+var visualization_raw = {
+  min: 0,
+  max: 3000,
+  bands: ['R', 'G', 'B'],
+};
+
+// to map
+Map.addLayer(L8_col.first(), visualization_raw, 'Masked Image');
+
+Map.centerObject(my_aoi);

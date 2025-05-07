@@ -1,0 +1,156 @@
+/******************************************************************************
+
+Landsat Processing
+
+Description:
+Functions useful to process Landsat time series data.
+
+Implemented:
+  - Get raw datasets from Landsat 4, 5, 7, 8 
+  - rename bands
+  - cloud, shadow and snow masking based on QA_Pixel band
+  - casting of image values
+  - selection of needed bands
+
+
+Returns:
+  - analysis-ready datased
+
+To do:
+  - 
+
+How to use:
+
+*******************************************************************************/
+
+
+
+// GET LANDSAT COLLECTIONS 
+// --------------------------------------------------------------------------
+
+
+exports.get_data = function(sensor_type, aoi, start_date, end_date) {
+  
+  // Define Function to select and rename bands for Landsat-8
+  function renameBandsOLI(image) {
+      var renamed_bands = image.select(['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5'])
+                               .rename (['BLUE', 'GREEN', 'RED', 'NIRED']);
+      return image.addBands(renamed_bands);
+  }
+  
+  // Function to select and rename bands for Landsat-4/5/7
+  function renameBandsTM_ETM(image) {
+      var renamed_bands = image.select(['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4'])
+                               .rename (['BLUE', 'GREEN', 'RED', 'NIRED']);
+      return image.addBands(renamed_bands);
+  }
+  
+  // Define Landsat-4 Image Collection
+  
+  if (sensor_type == "L4") {
+    return ee.ImageCollection('LANDSAT/LT04/C02/T1_L2')
+        .filterBounds(aoi)                  // only images covering the AOI
+        .filterDate(start_date, end_date)   // date filter
+        .map(renameBandsTM_ETM);  
+  }
+  
+  // Define Landsat-5 Image Collection
+  
+  if (sensor_type == "L5"){
+    return ee.ImageCollection('LANDSAT/LT05/C02/T1_L2')
+        .filterBounds(aoi)                  // only images covering the AOI
+        .filterDate(start_date, end_date)   // date filter
+        .map(renameBandsTM_ETM);  
+  }
+    
+  // Define Landsat-7 Image Collection
+  
+  if (sensor_type == "L7"){
+    return ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
+        .filterBounds(aoi)                  // only images covering the AOI
+        .filterDate(start_date, end_date)   // date filter
+        .map(renameBandsTM_ETM);  
+  }
+  
+  // Define Landsat-8 Image Collection
+  
+  if (sensor_type == "L8"){
+    return ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+        .filterBounds(aoi)                  // only images covering the AOI
+        .filterDate(start_date, end_date)  // date filter
+        .map(renameBandsOLI); 
+  }
+
+};
+
+
+
+// MASK CLOUDS, SHADOWS, CIRRUS AND SNOW  
+// --------------------------------------------------------------------------
+
+
+
+// Masking clouds, shadow, cirrus and snow using QA band:
+exports.mask_clear_pixels = function (image) {
+  // Get the pixel QA band.
+  var qa = image.select('QA_PIXEL');
+  // Bits 3 and 5 are cloud shadow and cloud, respectively.
+  // Use LeftShift-Operators to define Bit values
+  var dilated_value = (1 << 3);
+  var cloud_value = (1 << 3);
+  var cirrus_value = (1 << 2);
+  var shadow_value = (1 << 4);
+  var snow_value = (1 << 5);
+  // Create masks
+  var dilated_mask = qa.bitwiseAnd(dilated_value).eq(0);
+  var cloud_mask = qa.bitwiseAnd(cloud_value).eq(0);
+  var shadow_mask = qa.bitwiseAnd(shadow_value).eq(0);
+  var cirrus_mask = qa.bitwiseAnd(cirrus_value).eq(0);
+  var snow_mask = qa.bitwiseAnd(snow_value).eq(0);
+  // Given bit values should be set to zero for masking.
+  var combined_mask = cloud_mask.and(shadow_mask)
+                                .and(dilated_mask)
+                                .and(cirrus_mask)
+                                .and(snow_mask);
+  // 90m Buffer for the mask:
+  var mask = combined_mask.focal_min({radius: 90, units: 'meters'});
+  return image.updateMask(mask);
+};
+
+
+
+// Casting and select
+// --------------------------------------------------------------------------
+
+
+// Cast, select and convert needed bands to float
+exports.casting =  function (image) {
+  var casted_bands = image.select(['BLUE', 'GREEN', 'RED', 'NIRED'])
+                           .multiply(0.0000275).add(-0.2)
+                           .rename(["B", "G", "R", "NIR"])
+                           .toFloat();
+  var all_bands = image.addBands(casted_bands);
+  return all_bands.select(["B", "G", "R", "NIR"]);
+};
+  
+
+
+// Cast LS bands to S2 values
+// --------------------------------------------------------------------------
+
+
+
+exports.casting_LS_S2 =  function (image_collection, slopes, intercepts) {
+  
+  var bandNames_original = ['B','G','R','NIR'];
+  var bandNames_temp = ['B_new','G_new','R_new','NIR_new'];
+  
+  function casting (image){
+    var casted_bands = image.select(bandNames_original).multiply(slopes).add(intercepts).float().rename(bandNames_temp);
+    var all_bands = image.addBands(casted_bands);
+    return all_bands.select(bandNames_temp, bandNames_original);
+  }
+  
+  return image_collection.map(casting);
+
+};

@@ -1,0 +1,156 @@
+
+
+// Required tools
+var tools = require('users/fitoprincipe/geetools:tools');
+var batch = require('users/fitoprincipe/geetools:batch');
+var sentinel2 = require('users/jakobrieser1997/Biocrusts:Functions/Sentinel2');
+var image_processing = require('users/jakobrieser1997/Biocrusts:Functions/Image processing');
+var regional_parameters = require('users/jakobrieser1997/Biocrusts:Functions/Regional parameters');
+
+// define time range
+var START_DATE = "2017-01-01";
+var END_DATE = "2021-12-31";
+
+// Define regional parameters
+var REGION = "Lieberose";
+var PARAMETERS = regional_parameters.get_parameters(REGION);
+print("Parameters " + PARAMETERS.AOI_NAME, PARAMETERS);
+
+function mask_s2_cloudless (image_collection, aoi, start_date, end_date) {
+
+  // Define variables
+  var CLD_PRB_THRESH = 30;
+  var NIR_DRK_THRESH = 0.15;
+  var CLD_PRJ_DIST = 1;
+  var BUFFER = 25;
+
+
+  function get_s2_sr_cld_col (image_collection, aoi, start_date, end_date){
+    // # Import and filter s2cloudless.
+    var s2_cloudless_col = (ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY')
+          .filterBounds(aoi)
+          .filterDate(start_date, end_date))
+
+    // # Join the filtered s2cloudless collection to the SR collection by the 'system:index' property.
+    return ee.ImageCollection(ee.Join.saveFirst('s2cloudless')
+                                     .apply({
+                                             'primary': image_collection,
+                                             'secondary': s2_cloudless_col,
+                                             'condition': ee.Filter.equals({
+                                                 'leftField': 'system:index',
+                                                 'rightField': 'system:index'
+                                                 })
+                                      }));
+  
+  }
+  
+  
+  function add_cloud_bands(img) {
+    // # Get s2cloudless image, subset the probability band.
+    var cld_prb = ee.Image(img.get('s2cloudless')).select('probability')
+
+    // # Condition s2cloudless by the probability threshold value.
+    var is_cloud = cld_prb.gt(CLD_PRB_THRESH).rename('clouds')
+
+    // # Add the cloud probability layer and cloud mask as image bands.
+    return img.addBands(ee.Image([cld_prb, is_cloud]))
+    
+  }
+  
+  
+  function add_shadow_bands(img) {
+      // # Identify water pixels from the SCL band.
+      var not_water = img.select('SCL').neq(6)
+  
+      // # Identify dark NIR pixels that are not water (potential cloud shadow pixels).
+      var SR_BAND_SCALE = 1e4
+      var dark_pixels = img.select('B8').lt(NIR_DRK_THRESH*SR_BAND_SCALE).multiply(not_water).rename('dark_pixels')
+
+      // # Determine the direction to project cloud shadow from clouds (assumes UTM projection).
+      var shadow_azimuth = ee.Number(90).subtract(ee.Number(img.get('MEAN_SOLAR_AZIMUTH_ANGLE')));
+
+      // # Project shadows from clouds for the distance specified by the CLD_PRJ_DIST input.
+      var cld_proj = (img.select('clouds').directionalDistanceTransform(shadow_azimuth, CLD_PRJ_DIST*10)
+          .reproject({'crs': img.select(0).projection(), 'scale': 100})
+          .select('distance')
+          .mask()
+          .rename('cloud_transform'))
+
+      // # Identify the intersection of dark pixels with cloud shadow projection.
+      var shadows = cld_proj.multiply(dark_pixels).rename('shadows')
+
+      // # Add dark pixels, cloud projection, and identified shadows as image bands.
+      return img.addBands(ee.Image([dark_pixels, cld_proj, shadows]))
+    
+  }
+
+
+  function add_cld_shdw_mask(img) {
+      // # Add cloud component bands.
+      var img_cloud = add_cloud_bands(img)
+
+      // # Add cloud shadow component bands.
+      var img_cloud_shadow = add_shadow_bands(img_cloud)
+
+      // # Combine cloud and shadow mask, set cloud and shadow as value 1, else 0.
+      var is_cld_shdw = img_cloud_shadow.select('clouds').add(img_cloud_shadow.select('shadows')).gt(0)
+
+      // # Remove small cloud-shadow patches and dilate remaining pixels by BUFFER input.
+      // # 20 m scale is for speed, and assumes clouds don't require 10 m precision.
+      is_cld_shdw = (is_cld_shdw.focal_min(2).focal_max(BUFFER*2/20)
+          .reproject({'crs': img.select([0]).projection(), 'scale': 20})
+          .rename('cloudmask'))
+
+      // # Add the final cloud-shadow mask to the image.
+      return img_cloud_shadow.addBands(is_cld_shdw)
+  
+  }
+
+
+  function apply_cld_shdw_mask(img) {
+      // # Subset the cloudmask band and invert it so clouds/shadow are 0, else 1.
+      var not_cld_shdw = img.select('cloudmask').not()
+      
+      var bandlist_mask = ee.List.sequence(0, 11, 1);	
+      var bandlist_not_mask = ee.List.sequence(12, 22, 1);	
+      
+      // # Subset reflectance bands and update their masks, return the result.
+      return img.select(bandlist_mask).updateMask(not_cld_shdw)
+                .addBands(img.select(bandlist_not_mask))
+  }
+
+  var s2_cld_col = get_s2_sr_cld_col(image_collection, aoi, start_date, end_date);
+
+  var s2_all_masks_col = s2_cld_col.map(add_cld_shdw_mask);
+
+  var s2_masked_col = s2_all_masks_col.map(apply_cld_shdw_mask);
+  
+  return s2_masked_col;
+
+}
+
+
+// APPLICATION 
+// --------------------------------------------------------------------------
+
+
+// Generate S2 collection
+var col_s2_raw = sentinel2.get_data (PARAMETERS.AOI, START_DATE, END_DATE);
+
+// Apply masking:
+var col_s2_masked =  mask_s2_cloudless(col_s2_raw, PARAMETERS.AOI, START_DATE, END_DATE);
+
+
+
+print("full collection", col_s2_raw)
+print("masked collection", col_s2_masked)
+
+//Center the map view on a given AOI with the zoom level.
+Map.centerObject(PARAMETERS.AOI);
+
+//ADD LAYERS TO THE MAP.
+//Add original image layer
+Map.addLayer(col_s2_raw.first(), {bands: ['B4', 'B3', 'B2'], min: 0, max: 2500}, 'Original Image')
+
+//Add masked image layer
+Map.addLayer(col_s2_masked.first(), {bands: ['B4', 'B3', 'B2'], min: 0, max: 2500}, 'Masked Image')

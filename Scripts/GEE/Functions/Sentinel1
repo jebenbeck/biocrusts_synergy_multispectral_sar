@@ -1,0 +1,207 @@
+/******************************************************************************
+
+Sentinel 1 processing
+
+Description:
+
+Implemented:
+
+How to use:
+  Load this script:
+    
+  Run it:
+    
+  
+*******************************************************************************/
+
+
+
+// Get Sentinel 1 imagery 
+// --------------------------------------------------------------------------
+
+exports.get_data = function (type, aoi, roi, orbitmode, orbitnumber, start_date, end_date, cutoff) {
+  return ee.ImageCollection('COPERNICUS/S1_GRD')
+        .filter(ee.Filter.listContains('transmitterReceiverPolarisation', type))
+        .filter(ee.Filter.eq('instrumentMode', 'IW'))
+        .filter(ee.Filter.eq('orbitProperties_pass', orbitmode))
+        .filter(ee.Filter.eq('resolution', 'H'))
+        .filter(ee.Filter.eq('relativeOrbitNumber_stop', orbitnumber))
+        //.filter(ee.Filter.eq('resolution_meters', 10)) //optional
+        .select(type, "angle")
+        .filterBounds(aoi)
+        .filterDate(start_date, end_date)
+        // filter extreme values
+        .map(function(image) {
+          var edge = image.lt(cutoff); //original: 30
+          var maskedImage = image.mask().and(edge.not());
+          image.updateMask(maskedImage);
+          return image.clip(roi);
+        });
+};
+
+
+
+// Terrain flattening 
+// --------------------------------------------------------------------------
+
+
+//Terrain flattening:
+exports.terrain_flattening = function (image_collection, type) {
+  
+  var slope_lib = require('users/filetransferullmann/SARprocessor:radiometric-slope-correction');
+  
+  function filter_angle (img) {
+    var minMax =  ee.Terrain.aspect(img.select('angle'))
+                                       .reduceRegion(ee.Reducer.mean(), 
+                                                     img.geometry(), 
+                                                     1000);
+    return img.set({
+      roi_mean: minMax.get('aspect')
+    });
+  }
+  
+  var collection_filtered = image_collection.map(filter_angle)
+                                            .filterMetadata('roi_mean', 'not_equals', null);
+  
+  var parameters = {
+      'model': 'volume', 
+      'elevation': ee.Image("USGS/SRTMGL1_003"),//ee.Image("NASA/NASADEM_HGT/001"),
+      'buffer': 25,      // buffer in meter
+      'selected_band': type};
+      
+  return slope_lib.slope_correction(collection_filtered, parameters);
+};
+
+
+
+// Data conversion 
+// --------------------------------------------------------------------------
+
+
+//Convert data from dB to linear and vice versa
+
+exports.toNatural = function (image) {
+  var converted = ee.Image(10.0).pow(image.select(0).divide(10.0));
+  var band_name = image.select(0).bandNames();
+  return image.addBands(converted.rename("converted"))
+            .select("converted").rename(band_name);
+};
+
+exports.todB = function (image) {
+  return ee.Image(image)
+            .log10()
+            .multiply(10.0)
+            .copyProperties(image, image.propertyNames());
+};
+
+
+
+// Median Speckle filter 
+// --------------------------------------------------------------------------
+
+
+exports.speckle_filter = function(image) {
+  var smoothed = image.select(0).focal_median(1.5,'square','pixels'); 
+  return smoothed.copyProperties(image, image.propertyNames());
+};
+
+
+
+// Calculate mathematical band combinations
+// --------------------------------------------------------------------------
+
+
+exports.calculate_mbcs = function (image_collection) {
+
+// Add VV + VH
+  
+  function apply_add_VVVH (image){
+    var add_VVVH = image.expression(
+      "(VV + VH)",
+      {
+      VV: image.select("VV"),
+      VH: image.select("VH"),
+      });
+    return image
+      .addBands(add_VVVH
+      .rename('add_VVVH'))
+      .float();
+  }
+
+// Add VV-VH
+  
+  function apply_sub_VVVH (image){
+    var sub_VVVH = image.expression(
+      "(VV - VH)",
+      {
+      VV: image.select("VV"),
+      VH: image.select("VH"),
+      });
+    return image
+      .addBands(sub_VVVH
+      .rename('sub_VVVH'))
+      .float();
+  }
+
+// Add VV/VH
+  
+  function apply_diff_VVVH (image){
+    var diff_VVVH = image.expression(
+      "(VV / VH)",
+      {
+      VV: image.select("VV"),
+      VH: image.select("VH"),
+      });
+    return image
+      .addBands(diff_VVVH
+      .rename('div_VVVH'))
+      .float();
+  }
+
+// Add VH/VV
+  
+  function apply_diff_VHVV (image){
+    var diff_VHVV = image.expression(
+      "(VH / VV)",
+      {
+      VV: image.select("VV"),
+      VH: image.select("VH"),
+      });
+    return image
+      .addBands(diff_VHVV
+      .rename('div_VHVV'))
+      .float();
+  }
+
+// Add VH*VV
+  
+  function apply_mult_VVVH (image){
+    var mult_VVVH = image.expression(
+      "(VV * VH)",
+      {
+      VV: image.select("VV"),
+      VH: image.select("VH"),
+      });
+    return image
+      .addBands(mult_VVVH
+      .rename('mult_VHVV'))
+      .float();
+  }
+
+  
+// Add the indices to the image collection
+
+  var result = image_collection.map(apply_add_VVVH)
+                               .map(apply_sub_VVVH)
+                               .map(apply_diff_VVVH)
+                               .map(apply_diff_VHVV)
+                               .map(apply_mult_VVVH);
+
+// return image collection
+
+  return result;
+
+};
+
+
+
