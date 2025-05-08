@@ -2,7 +2,9 @@ This repository contains the code and graphics used in my master's thesis:
 
 # A Synergistic Use of Optical and SAR Remote Sensing Data for the Long-term Evolution of Biocrusts and their Activity Across Diverse Dryland Ecosystems
 
-## Contents:
+You can have a look at the thesis here: [MSc_Thesis_Biocrusts.pdf](https://github.com/user-attachments/files/20109738/MSc_Thesis_Rieser_Biocrusts.pdf)
+
+**Table of contents:**
 
 **1) Graphics:**\
    All graphics and maps included in the thesis and the appendix
@@ -22,3 +24,4 @@ This repository contains the code and graphics used in my master's thesis:
   - Calculating time series statistics
   - Visualizing the time series and classification results
 - R-Scripts for downloading meteorological data from DWD and AEMET
+
