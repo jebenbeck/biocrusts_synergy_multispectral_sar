@@ -16,12 +16,11 @@ You can have a look at the thesis here: [MSc_Thesis_Biocrusts.pdf](https://githu
 
 **3) Scripts:**
 
-- Google Earth Engine Scripts tp process satellite time series data
-  - Sentinel-2 and Landsat 4-8 processing chain includes includes extensive cloud, shadow and snow masking, calculation of multispectral indices, harmonization between Sentinel 2 and Landsat 4-8, and finally the spatiotemporal metrics per study area
-  - Sentinel-1 processing chain includes terrain flattening, speckle filtering, mathematical band combination and the calculation of spatiotemporal metrics for each study area
+- Google Earth Engine Scripts to process satellite time series data
+  - Sentinel-2 and Landsat 4-8 processing chain includes includes extensive cloud, shadow, and snow masking, calculation of multispectral indices, harmonization between Sentinel and Landsat and finally, the spatiotemporal metrics per study area
+  - Sentinel-1 processing chain includes terrain flattening, speckle filtering, mathematical band combinations and the calculation of spatiotemporal metrics for each study area
 - R-Scripts for postprocessing and statistical analysis
   - Random forest classification and regression
   - Calculating time series statistics
   - Visualizing the time series and classification results
 - R-Scripts for downloading meteorological data from DWD and AEMET
-
